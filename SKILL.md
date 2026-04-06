@@ -1,22 +1,23 @@
 ---
 name: codex-executor
-description: "Use when you want to delegate coding implementation to Codex CLI while keeping Opus for planning and review, reducing Opus token spend by 70-85%."
-version: 1.0.0
+description: "Use when you want Claude Code to delegate coding implementation to Codex CLI, reducing Opus token spend by 70-85%. Works in any directory, git optional."
+version: 1.1.0
 requires:
   - codex exec (codex-cli >= 0.118.0)
-  - git (for diff-based review)
+  - git (optional, enables diff-based review)
 ---
 
 # Codex Executor
 
-Hybrid workflow: **Opus plans and reviews, Codex CLI executes.**
-Keeps Opus token spend minimal while leveraging Codex for the bulk of implementation work.
+**Claude Code drives Codex CLI as its execution engine.**
+Claude Code (Opus) does the thinking — plans and reviews.
+Codex CLI does the labor — edits files, runs commands, executes tests.
 
 ## Intent
 
-Route coding implementation through `codex exec` non-interactively.
-Opus owns the plan (what to do, in what order, how to verify) and the review (did it actually work).
-Codex owns the execution (file edits, shell commands, test runs).
+Claude Code controls `codex exec` as a non-interactive subprocess.
+Claude Code owns the brain: what to do, in what order, how to verify, whether the result is correct.
+Codex CLI owns the hands: file edits, shell commands, test runs.
 
 ## Trigger Keywords
 
@@ -29,14 +30,14 @@ Codex owns the execution (file edits, shell commands, test runs).
 ## Preconditions
 
 1. `codex` binary is reachable: `codex --version` must succeed
-2. Working directory is a git repository (required for diff-based review)
-3. User has specified the task clearly enough for Opus to write a detailed plan
-4. Codex config at `~/.codex/config.toml` has `approval_policy = "never"` for non-interactive use
+2. User has specified the task clearly enough for Claude Code to write a detailed plan
+3. Codex config at `~/.codex/config.toml` has `approval_policy = "never"` for non-interactive use
+4. Git is **optional** — if available, enables `git diff` review; otherwise uses file snapshot comparison
 
 Check preconditions:
 ```bash
 codex --version && echo "OK: codex available" || echo "FAIL: codex not found"
-git rev-parse --git-dir 2>/dev/null && echo "OK: git repo" || echo "WARN: not a git repo"
+git rev-parse --git-dir 2>/dev/null && echo "OK: git repo (diff review)" || echo "OK: no git (snapshot review)"
 ```
 
 ## Decision Boundary
@@ -44,22 +45,21 @@ git rev-parse --git-dir 2>/dev/null && echo "OK: git repo" || echo "WARN: not a 
 **Use this skill when:**
 - Implementation task is well-scoped with clear success criteria
 - Task involves multiple file edits that would burn Opus tokens on boilerplate
-- Working codebase is in a git repo (so `git diff` can serve as ground truth)
-- You want to save Opus tokens on bulk coding work
+- You want Claude Code to stay in control while offloading execution to a cheaper model
+- Works in **any directory** — git repo or not
 
 **Do NOT use this skill when:**
 - Task requires Opus-level architectural reasoning throughout execution (not just at plan time)
-- Codebase is not in a git repo (review phase cannot verify changes reliably)
 - Task is a one-line fix (three-phase overhead not worth it)
 - Interactive debugging is needed that Codex cannot resolve autonomously
 
 ## Core Workflow
 
-### Phase 1: Opus Plans (you are Opus)
+### Phase 1: Claude Code Plans
 
 Analyze the user's request and produce a structured plan. Write it to a temp file:
 
-**Plan file path:** `C:/Users/Administrator/.codex/tmp/codex-plan-<YYYYMMDD-HHmmss>.md`
+**Plan file path:** `~/.codex/tmp/codex-plan-<YYYYMMDD-HHmmss>.md`
 
 **Plan format:**
 
@@ -135,22 +135,39 @@ CODEX_EXIT=$?
 - Set appropriate timeout (speed: 300000ms, auto-max: 600000ms)
 - After completion, read the output files
 
-### Phase 3: Opus Reviews (you are Opus again)
+### Phase 3: Claude Code Reviews
 
-Collect evidence from three sources, in priority order:
+Collect evidence. The review strategy adapts to the environment:
 
-**Source 1 — Ground truth (highest weight):**
+**Mode A — Git repo available (preferred):**
+
 ```bash
+# Ground truth: what actually changed
 git -C "$WORKDIR" diff HEAD
 ```
 
-**Source 2 — Codex's self-report:**
+**Mode B — No git (any directory):**
+
 ```bash
-cat "$SUMMARY_FILE"
+# Before Phase 2: snapshot target files listed in plan
+find "$WORKDIR" -name "*.ts" -o -name "*.py" -o -name "*.js" | \
+  xargs md5sum > "$TMP/snapshot-before-$TS.txt"
+
+# After Phase 2: compare
+find "$WORKDIR" -name "*.ts" -o -name "*.py" -o -name "*.js" | \
+  xargs md5sum > "$TMP/snapshot-after-$TS.txt"
+diff "$TMP/snapshot-before-$TS.txt" "$TMP/snapshot-after-$TS.txt"
+
+# Then read the changed files directly to review content
 ```
 
-**Source 3 — Failed commands (find hidden failures):**
+**Both modes also check:**
+
 ```bash
+# Codex's self-report
+cat "$SUMMARY_FILE"
+
+# Failed commands in event stream
 grep -i "exit_code" "$EVENTS_FILE" | grep -v '"exit_code":0' | head -20
 ```
 
@@ -225,13 +242,13 @@ Codex profiles are pre-configured in `~/.codex/config.toml`.
 
 ## Red Flags
 
-- NEVER skip Phase 3 review because Codex's summary says "done" — always read `git diff HEAD`
+- NEVER skip Phase 3 review because Codex's summary says "done" — always verify actual file changes
 - NEVER pass the previous session's events file as context to a retry call — keep Codex exec stateless
 - NEVER attempt more than 3 retries automatically — escalate to human after third failure
-- NEVER use this skill without a git repo — review phase depends on `git diff`
 - NEVER write plan files to the project working directory — use `~/.codex/tmp/` to avoid polluting the project
 - ALWAYS set `--color never` — ANSI codes corrupt the JSONL event stream
 - ALWAYS use `timeout` to prevent hung Codex processes
+- In git repos, prefer `git diff` for review; in non-git dirs, use file snapshot comparison
 
 ## Smoke Command
 

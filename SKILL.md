@@ -118,9 +118,11 @@ WORKDIR="<from plan Context>"
 PROFILE="<speed|auto-max from complexity routing>"
 
 # Execute (timeout: speed=300s, auto-max=900s)
+# Add --skip-git-repo-check when WORKDIR is not a git repository
 timeout ${TIMEOUT} codex exec \
   -C "$WORKDIR" \
   -p "$PROFILE" \
+  --skip-git-repo-check \
   --color never \
   --json \
   -o "$SUMMARY_FILE" \
@@ -133,6 +135,7 @@ CODEX_EXIT=$?
 **Important:**
 - Run this via the Bash tool with `run_in_background: true` for long tasks
 - Set appropriate timeout (speed: 300000ms, auto-max: 600000ms)
+- Use `--skip-git-repo-check` when `WORKDIR` is not a git repository so Codex can run in plain directories
 - After completion, read the output files
 
 ### Phase 3: Claude Code Reviews
@@ -208,9 +211,11 @@ Invoke `codex exec` again with `PATCH_PROMPT` as a **fresh independent call** (n
 ```bash
 PATCH_FILE="$TMP/codex-patch-$TS-attempt$N.md"
 # write PATCH_PROMPT to PATCH_FILE, then:
+# Add --skip-git-repo-check when WORKDIR is not a git repository
 timeout ${TIMEOUT} codex exec \
   -C "$WORKDIR" \
   -p "$PROFILE" \
+  --skip-git-repo-check \
   --color never \
   --json \
   -o "$TMP/codex-patch-summary-$TS-attempt$N.txt" \
@@ -219,6 +224,56 @@ timeout ${TIMEOUT} codex exec \
 ```
 
 Re-run Phase 3 review. After 3 failed attempts: emit blocker report to user and stop.
+
+## Parallel Execution (Independent Subtasks)
+
+When the plan contains independent subtasks (no shared state between them), Claude Code can spawn multiple Codex instances in parallel:
+
+### When to Parallelize
+- Multiple files need changes that don't depend on each other
+- Independent test suites to run
+- Separate modules to refactor
+
+### How It Works
+1. Claude Code splits the plan into independent sub-plans
+2. Each sub-plan gets its own `codex exec` call (with unique timestamp)
+3. All calls run concurrently via background execution
+4. Claude Code collects all results and reviews together
+
+Example:
+```bash
+# Sub-task A: modify auth module
+codex exec -C "$WORKDIR" --skip-git-repo-check -p speed \
+  -o "$TMP/codex-summary-$TS-A.txt" "Sub-plan A content" &
+
+# Sub-task B: modify logging module
+codex exec -C "$WORKDIR" --skip-git-repo-check -p speed \
+  -o "$TMP/codex-summary-$TS-B.txt" "Sub-plan B content" &
+
+# Wait for all
+wait
+```
+
+### Conflict Resolution
+After parallel execution, Claude Code checks for conflicts:
+- File-level: if two sub-tasks modified the same file, review manually
+- Test-level: run full test suite after merging all changes
+
+## Cost Tracking
+
+After each workflow completion, report estimated token usage:
+
+| Phase | Model | Est. Input Tokens | Est. Output Tokens |
+|-------|-------|-------------------|-------------------|
+| Phase 1: Plan | Opus | <estimated> | <estimated> |
+| Phase 2: Execute | Codex (gpt-5.4) | <estimated> | <estimated> |
+| Phase 3: Review | Opus | <estimated> | <estimated> |
+| Retry (if any) | Codex | <estimated> | <estimated> |
+| **Opus Total** | | **<sum>** | **<sum>** |
+| **Codex Total** | | **<sum>** | **<sum>** |
+| **Estimated Savings** | | **<percentage vs pure Opus>** | |
+
+Tip: Use `wc -c` on plan/summary files for rough token estimates (1 token ≈ 4 chars).
 
 ## Profile Routing Reference
 
